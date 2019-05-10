@@ -26,6 +26,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "ntstatus.h"
 #define WIN32_NO_STATUS
@@ -228,8 +229,24 @@ NTSTATUS WINAPI NtQueryInformationProcess(
                     ret = STATUS_INVALID_HANDLE;
                 else
                 {
-                    /* FIXME : real data */
                     memset(&pvmi, 0 , sizeof(VM_COUNTERS));
+
+                    SERVER_START_REQ(get_process_vm_info)
+                    {
+                        req->handle = wine_server_obj_handle( ProcessHandle );
+                        if ((ret = wine_server_call( req )) == STATUS_SUCCESS)
+                        {
+                            pvmi.PageFaultCount = reply->faults;
+                            pvmi.VirtualSize = reply->virt;
+                            pvmi.PeakVirtualSize = reply->virt_peak;
+                            pvmi.WorkingSetSize = reply->resident;
+                            pvmi.PeakWorkingSetSize = reply->resident_peak;
+                            pvmi.PagefileUsage = reply->commit;
+                            pvmi.PeakPagefileUsage = reply->commit_peak;
+                            pvmi.PrivatePageCount = reply->commit / sysconf( _SC_PAGESIZE );
+                        }
+                    }
+                    SERVER_END_REQ;
 
                     len = ProcessInformationLength;
                     if (len != FIELD_OFFSET(VM_COUNTERS,PrivatePageCount)) len = sizeof(VM_COUNTERS);
@@ -260,16 +277,17 @@ NTSTATUS WINAPI NtQueryInformationProcess(
                     ret = STATUS_INVALID_HANDLE;
                 else
                 {
-                    /* FIXME : User- and KernelTime have to be implemented */
                     memset(&pti, 0, sizeof(KERNEL_USER_TIMES));
 
-                    SERVER_START_REQ(get_process_info)
+                    SERVER_START_REQ(get_process_cpu_info)
                     {
                       req->handle = wine_server_obj_handle( ProcessHandle );
                       if ((ret = wine_server_call( req )) == STATUS_SUCCESS)
                       {
                           pti.CreateTime.QuadPart = reply->start_time;
                           pti.ExitTime.QuadPart = reply->end_time;
+                          pti.KernelTime.QuadPart = reply->kernel_time;
+                          pti.UserTime.QuadPart = reply->user_time;
                       }
                     }
                     SERVER_END_REQ;

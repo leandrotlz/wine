@@ -3691,6 +3691,7 @@ BOOL WINAPI K32QueryWorkingSetEx( HANDLE process, LPVOID buffer, DWORD size )
 BOOL WINAPI K32GetProcessMemoryInfo(HANDLE process,
                                     PPROCESS_MEMORY_COUNTERS pmc, DWORD cb)
 {
+    PPROCESS_MEMORY_COUNTERS_EX pmce = (PPROCESS_MEMORY_COUNTERS_EX)pmc;
     NTSTATUS status;
     VM_COUNTERS vmc;
 
@@ -3719,6 +3720,11 @@ BOOL WINAPI K32GetProcessMemoryInfo(HANDLE process,
     pmc->QuotaNonPagedPoolUsage = vmc.QuotaNonPagedPoolUsage;
     pmc->PagefileUsage = vmc.PagefileUsage;
     pmc->PeakPagefileUsage = vmc.PeakPagefileUsage;
+
+    if (cb >= sizeof(PROCESS_MEMORY_COUNTERS_EX)) {
+        pmce->cb = sizeof(PROCESS_MEMORY_COUNTERS_EX);
+        pmce->PrivateUsage = vmc.PrivatePageCount * sysconf( _SC_PAGESIZE );
+    }
 
     return TRUE;
 }

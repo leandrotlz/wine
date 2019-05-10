@@ -216,16 +216,130 @@ BOOL WINAPI IsProcessorFeaturePresent (
  */
 BOOL WINAPI K32GetPerformanceInfo(PPERFORMANCE_INFORMATION info, DWORD size)
 {
+    static SIZE_T commitpeak = 0;
+#ifdef linux
+    FILE *f;
+#endif
+    MEMORYSTATUSEX mem_status;
+    SYSTEM_PROCESS_INFORMATION *spi;
+    ULONG bufsize = 0x4000;
+    void *buf = NULL;
     NTSTATUS status;
 
     TRACE( "(%p, %d)\n", info, size );
 
-    status = NtQuerySystemInformation( SystemPerformanceInformation, info, size, NULL );
-
-    if (status)
+    if(size < sizeof(PERFORMANCE_INFORMATION))
     {
-        SetLastError( RtlNtStatusToDosError( status ) );
+        SetLastError(ERROR_BAD_LENGTH);
         return FALSE;
     }
+
+    memset(info, 0, sizeof(PERFORMANCE_INFORMATION));
+
+    info->cb                = sizeof(PERFORMANCE_INFORMATION);
+    info->PageSize          = system_info.PageSize;
+
+    do {
+        bufsize *= 2;
+        HeapFree(GetProcessHeap(), 0, buf);
+        buf = HeapAlloc(GetProcessHeap(), 0, bufsize);
+        if (!buf)
+            break;
+
+        status = NtQuerySystemInformation(SystemProcessInformation, buf, bufsize, NULL);
+    } while(status == STATUS_INFO_LENGTH_MISMATCH);
+
+    if (status != STATUS_SUCCESS)
+    {
+        HeapFree(GetProcessHeap(), 0, buf);
+    }
+
+    spi = buf;
+    while(spi) {
+        info->ProcessCount++;
+        info->ThreadCount += spi->dwThreadCount;
+        info->HandleCount += spi->HandleCount;
+
+        if (spi->NextEntryOffset == 0)
+            break;
+
+        spi = (SYSTEM_PROCESS_INFORMATION *)(((PCHAR)spi) + spi->NextEntryOffset);
+    }
+
+    HeapFree(GetProcessHeap(), 0, buf);
+
+#ifdef linux
+    f = fopen( "/proc/meminfo", "r" );
+    if (f)
+    {
+        char buffer[256];
+        unsigned long total, used, free, shared, buffers, cached, commit;
+
+        while (fgets( buffer, sizeof(buffer), f ))
+        {
+            /* old style /proc/meminfo ... */
+            if (sscanf( buffer, "Mem: %lu %lu %lu %lu %lu %lu",
+                        &total, &used, &free, &shared, &buffers, &cached ))
+            {
+                info->CommitTotal += used / system_info.PageSize;
+                info->PhysicalTotal += total / system_info.PageSize;
+                info->CommitLimit += total / system_info.PageSize;
+                info->PhysicalAvailable += (free + buffers + cached) / system_info.PageSize;
+                info->SystemCache += cached / system_info.PageSize;
+            }
+            if (sscanf( buffer, "Swap: %lu %lu %lu", &total, &used, &free ))
+            {
+                info->CommitTotal += used / system_info.PageSize;
+                info->CommitLimit += total / system_info.PageSize;
+            }
+
+            /* new style /proc/meminfo ... */
+            if (sscanf(buffer, "MemTotal: %lu", &total))
+                info->PhysicalTotal = total / (system_info.PageSize / 1024);
+            if (sscanf(buffer, "MemFree: %lu", &free))
+                info->PhysicalAvailable += free / (system_info.PageSize / 1024);
+            if (sscanf(buffer, "CommitLimit: %lu", &commit))
+                info->CommitLimit = commit / (system_info.PageSize / 1024);
+            if (sscanf(buffer, "Committed_AS: %lu", &commit))
+                info->CommitTotal = commit / (system_info.PageSize / 1024);
+            if (sscanf(buffer, "Buffers: %lu", &buffers))
+                info->PhysicalAvailable += buffers / (system_info.PageSize / 1024);
+            if (sscanf(buffer, "Cached: %lu", &cached))
+            {
+                info->SystemCache = cached / (system_info.PageSize / 1024);
+                info->PhysicalAvailable += cached / (system_info.PageSize / 1024);
+            }
+            if (sscanf(buffer, "Slab: %lu", &used) ||
+                sscanf(buffer, "KernelStack: %lu", &used) ||
+                sscanf(buffer, "PageTables: %lu", &used))
+            {
+                info->KernelTotal += used / (system_info.PageSize / 1024);
+                info->KernelNonpaged += used / (system_info.PageSize / 1024);
+            }
+        }
+
+        fclose(f);
+
+        info->CommitPeak = commitpeak = max(commitpeak, info->CommitTotal);
+        return TRUE;
+    }
+#endif
+
+    /* not linux or /proc open failed */
+
+    mem_status.dwLength = sizeof(mem_status);
+    if (!GlobalMemoryStatusEx( &mem_status ))
+        return FALSE;
+
+    info->cb                = sizeof(PERFORMANCE_INFORMATION);
+    info->CommitTotal       = min(((mem_status.ullTotalPageFile - mem_status.ullAvailPageFile) /
+                                    system_info.PageSize), MAXDWORD);
+    info->CommitLimit       = min((mem_status.ullTotalPageFile / system_info.PageSize), MAXDWORD);
+    info->PhysicalTotal     = min((mem_status.ullTotalPhys / system_info.PageSize), MAXDWORD);
+    info->PhysicalAvailable = min((mem_status.ullAvailPhys / system_info.PageSize), MAXDWORD);
+    info->CommitPeak        = commitpeak = max(commitpeak, info->CommitTotal);
+
+    FIXME("stub\n");
+
     return TRUE;
 }

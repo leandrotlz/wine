@@ -3495,3 +3495,30 @@ enum coords_relative
 @REQ(set_suspend_context)
     VARARG(context,context);   /* thread context */
 @END
+
+
+/* Retrieve CPU usage information about a process */
+@REQ(get_process_cpu_info)
+    obj_handle_t handle;           /* process handle */
+@REPLY
+    process_id_t pid;              /* server process id */
+    timeout_t    start_time;       /* process start time */
+    timeout_t    end_time;         /* process end time */
+    timeout_t    kernel_time;      /* total kernel time */
+    timeout_t    user_time;        /* total user time */
+@END
+
+
+/* Retrieve VM usage information about a process */
+@REQ(get_process_vm_info)
+    obj_handle_t handle;           /* process handle */
+@REPLY
+    process_id_t pid;              /* server process id */
+    unsigned int faults;           /* total page faults */
+    mem_size_t   virt;             /* virtual address usage */
+    mem_size_t   virt_peak;        /* peak virtual size */
+    mem_size_t   resident;         /* resident working set */
+    mem_size_t   resident_peak;    /* peak resident working set */
+    mem_size_t   commit;           /* commit charge */
+    mem_size_t   commit_peak;      /* peak commit charge */
+@END

@@ -550,24 +550,6 @@ VOID WINAPI GetSystemTimeAsFileTime(
 
 
 /*********************************************************************
- *      TIME_ClockTimeToFileTime    (olorin@fandra.org, 20-Sep-1998)
- *
- *  Used by GetProcessTimes to convert clock_t into FILETIME.
- *
- *      Differences to UnixTimeToFileTime:
- *          1) Divided by CLK_TCK
- *          2) Time is relative. There is no 'starting date', so there is
- *             no need for offset correction, like in UnixTimeToFileTime
- */
-static void TIME_ClockTimeToFileTime(clock_t unix_time, LPFILETIME filetime)
-{
-    long clocksPerSec = sysconf(_SC_CLK_TCK);
-    ULONGLONG secs = (ULONGLONG)unix_time * 10000000 / clocksPerSec;
-    filetime->dwLowDateTime  = (DWORD)secs;
-    filetime->dwHighDateTime = (DWORD)(secs >> 32);
-}
-
-/*********************************************************************
  *	GetProcessTimes				(KERNEL32.@)
  *
  *  Get the user and kernel execution times of a process,
@@ -587,23 +569,18 @@ static void TIME_ClockTimeToFileTime(clock_t unix_time, LPFILETIME filetime)
  *  olorin@fandra.org:
  *  Would be nice to subtract the cpu time used by Wine at startup.
  *  Also, there is a need to separate times used by different applications.
- *
- * BUGS
- *  KernelTime and UserTime are always for the current process
  */
 BOOL WINAPI GetProcessTimes( HANDLE hprocess, LPFILETIME lpCreationTime,
     LPFILETIME lpExitTime, LPFILETIME lpKernelTime, LPFILETIME lpUserTime )
 {
-    struct tms tms;
     KERNEL_USER_TIMES pti;
 
-    times(&tms);
-    TIME_ClockTimeToFileTime(tms.tms_utime,lpUserTime);
-    TIME_ClockTimeToFileTime(tms.tms_stime,lpKernelTime);
     if (NtQueryInformationProcess( hprocess, ProcessTimes, &pti, sizeof(pti), NULL))
         return FALSE;
     LL2FILETIME( pti.CreateTime.QuadPart, lpCreationTime);
     LL2FILETIME( pti.ExitTime.QuadPart, lpExitTime);
+    LL2FILETIME( pti.KernelTime.QuadPart, lpKernelTime);
+    LL2FILETIME( pti.UserTime.QuadPart, lpUserTime);
     return TRUE;
 }
 

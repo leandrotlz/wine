@@ -20,7 +20,9 @@
  */
 
 #include <stdarg.h>
+#include <stdio.h>
 #include <math.h>
+#include <sys/time.h>
 
 #define NONAMELESSUNION
 #define NONAMELESSSTRUCT
@@ -197,8 +199,56 @@ static const WCHAR path_uptime[] =
 
 static void CALLBACK collect_processor_time( struct counter *counter )
 {
-    counter->two.largevalue = 500000; /* FIXME */
+#ifdef linux
+    static unsigned long long cputicks_last[10] = { 0 };
+    static float cpupct_last = 0;
+    static struct timeval time_last = { 0 };
+
+    char buffer[256];
+    unsigned long long cputicks[10];
+    struct timeval now, elapsed;
+    int i;
+    FILE *f;
+
+    gettimeofday( &now, NULL );
+    timersub(&now, &time_last, &elapsed);
+
+    if (elapsed.tv_sec > 0)         /* max refresh of once per second! */
+    {
+        f = fopen("/proc/stat", "r");
+        if (f) {
+            memset(cputicks, 0, sizeof(cputicks));
+            while (fgets( buffer, sizeof(buffer), f )) {
+                if (sscanf(buffer, "cpu %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu",
+                        &cputicks[0], &cputicks[1], &cputicks[2], &cputicks[3], &cputicks[4],
+                        &cputicks[5], &cputicks[6], &cputicks[7], &cputicks[8], &cputicks[9]) >= 4)
+                {
+                    unsigned long long cpuelapsed[10];
+                    unsigned long long total = 0;
+                    for (i = 0; i < 10; i++)
+                    {
+                        cpuelapsed[i] = cputicks[i] - cputicks_last[i];
+                        total += cpuelapsed[i];
+                    }
+
+                    /* user + nice + system + irq + softirq */
+                    cpupct_last = (cpuelapsed[0] + cpuelapsed[1] + cpuelapsed[2] + cpuelapsed[5] + cpuelapsed[6]) * 100.0 / (float)total;
+
+                    memcpy(cputicks_last, cputicks, sizeof(cputicks));
+                    memcpy(&time_last, &now, sizeof(now));
+                    break;
+                }
+            }
+            fclose(f);
+        }
+    }
+
+    counter->two.largevalue = cpupct_last * 100000;
     counter->status = PDH_CSTATUS_VALID_DATA;
+#else
+    counter->two.largevalue = 500000; /* FIXME */
+    counter->status = PDH_CSTATUS_VALID_DATA; /* LIES! */
+#endif
 }
 
 static void CALLBACK collect_uptime( struct counter *counter )
@@ -1240,11 +1290,126 @@ PDH_STATUS WINAPI PdhEnumObjectItemsA(LPCSTR szDataSource, LPCSTR szMachineName,
                                       LPSTR mszCounterList, LPDWORD pcchCounterListLength, LPSTR mszInstanceList,
                                       LPDWORD pcchInstanceListLength, DWORD dwDetailLevel, DWORD dwFlags)
 {
-    FIXME("%s, %s, %s, %p, %p, %p, %p, %d, 0x%x: stub\n", debugstr_a(szDataSource), debugstr_a(szMachineName),
-         debugstr_a(szObjectName), mszCounterList, pcchCounterListLength, mszInstanceList,
-         pcchInstanceListLength, dwDetailLevel, dwFlags);
+    WCHAR *objW, *pathW;
+    PDH_STATUS ret = ERROR_SUCCESS;
+    DWORD countersz = 0;
+    DWORD instancesz = 0;
+    int i;
 
-    return PDH_NOT_IMPLEMENTED;
+    if (szDataSource)
+    {
+        FIXME("log file not supported\n");
+        return PDH_NOT_IMPLEMENTED;
+    }
+
+    if (szMachineName)
+    {
+        FIXME("remote machine not supported\n");
+        return PDH_CSTATUS_NO_MACHINE;
+    }
+
+    TRACE("%s %p %u %p %u %d 0x%08x\n", szObjectName, mszCounterList, pcchCounterListLength ? *pcchCounterListLength : 0, mszInstanceList, pcchInstanceListLength ? *pcchInstanceListLength : 0, dwDetailLevel, dwFlags);
+
+    if (!szObjectName) return PDH_INVALID_ARGUMENT;
+
+    if (!(objW = pdh_strdup_aw( szObjectName )))
+        return PDH_MEMORY_ALLOCATION_FAILURE;
+
+    /* check all counters for a matching object */
+
+    for (i = 0; i < sizeof(counter_sources) / sizeof(counter_sources[0]); i++)
+    {
+        WCHAR *p1, *p2;
+
+        /* szObjectName comes in without the leading backslash */
+
+        if (!(pathW = pdh_strdup(counter_sources[i].path + 1)))
+        {
+            ret = PDH_MEMORY_ALLOCATION_FAILURE;
+            goto fail;
+        }
+
+        /* ugly business of parsing out instance name if it has one */
+
+        p1 = strchrW(pathW, '(');
+        if (p1)
+            *p1 = 0;
+
+        /* compare against object name with instance removed */
+
+        if (strcmpW(objW, pathW))
+            continue;
+
+        /* extract instance */
+
+        if (p1)
+        {
+            ++p1;
+
+            if ((p2 = strchrW(p1, ')')))
+            {
+                int required;
+
+                *p2 = 0;                /* remove closing paren */
+                required = WideCharToMultiByte( CP_ACP, 0, p1, -1, NULL, 0, NULL, NULL );
+
+                /* add to caller's buffer if there's room */
+
+                if (pcchInstanceListLength && *pcchInstanceListLength > required + instancesz)
+                {
+                    WideCharToMultiByte( CP_ACP, 0, p1, -1, mszInstanceList + instancesz,
+                            *pcchInstanceListLength - instancesz, NULL, NULL);
+                }
+
+                instancesz += required;
+                p1 = p2 + 1;            /* advance past parenthesis we nulled */
+            }
+        }
+
+        /* parse out counter name */
+
+        p1 = strrchrW(p1 ? p1 : pathW, '\\');
+        if (p1++)
+        {
+            int required = WideCharToMultiByte( CP_ACP, 0, p1, -1, NULL, 0, NULL, NULL );
+
+            /* add to caller's buffer if there's room */
+
+            if (pcchCounterListLength && *pcchCounterListLength > required + countersz)
+            {
+                WideCharToMultiByte( CP_ACP, 0, p1, -1, mszCounterList + countersz,
+                        *pcchCounterListLength - countersz, NULL, NULL);
+            }
+
+            countersz += required;
+        }
+
+        heap_free(pathW);
+    }
+
+    /* add terminating empty string */
+
+    if (pcchCounterListLength && *pcchCounterListLength > countersz)
+        mszCounterList[countersz] = 0;
+    if (countersz)
+        ++countersz;
+    if (pcchInstanceListLength && *pcchInstanceListLength > instancesz)
+        mszInstanceList[instancesz] = 0;
+    if (instancesz)
+        ++instancesz;
+
+    if (pcchCounterListLength)
+        *pcchCounterListLength = countersz;
+    if (pcchInstanceListLength)
+        *pcchInstanceListLength = instancesz;
+
+    if (countersz == 0 && instancesz == 0)
+        ret = PDH_CSTATUS_NO_OBJECT;
+
+fail:
+    heap_free( objW );
+
+    return ret;
 }
 
 /***********************************************************************

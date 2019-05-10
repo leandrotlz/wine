@@ -22,6 +22,7 @@
 #include "wine/port.h"
 
 #include <assert.h>
+#include <errno.h>
 #include <limits.h>
 #include <signal.h>
 #include <string.h>
@@ -336,6 +337,7 @@ struct thread *create_process( int fd, struct thread *parent_thread, int inherit
     process->trace_data      = 0;
     process->rawinput_mouse  = NULL;
     process->rawinput_kbd    = NULL;
+    process->commit_peak     = 0;
     list_init( &process->thread_list );
     list_init( &process->locks );
     list_init( &process->classes );
@@ -1291,5 +1293,141 @@ DECL_HANDLER(make_process_system)
         close_process_desktop( process );
         if (!--user_processes && !shutdown_stage && master_socket_timeout != TIMEOUT_INFINITE)
             shutdown_timeout = add_timeout_user( master_socket_timeout, server_shutdown_timeout, NULL );
+    }
+}
+
+#ifdef linux
+/* helper for opening proc files */
+static FILE *open_proc_file( struct process *process, const char *fn )
+{
+    char buffer[64];
+    FILE *fp;
+
+    if (process->unix_pid == -1)
+    {
+        set_error( STATUS_ACCESS_DENIED );
+        return NULL;
+    }
+
+    sprintf( buffer, "/proc/%u/%s", process->unix_pid, fn );
+    if (!(fp = fopen( buffer, "r" )))
+    {
+        if (errno == ENOENT)  /* probably got killed */
+        {
+            process->unix_pid = -1;
+            set_error( STATUS_ACCESS_DENIED );
+        }
+        else file_set_error();
+    }
+    return fp;
+}
+
+static timeout_t clock_to_timeout(clock_t unix_time)
+{
+    long clocksPerSec = sysconf(_SC_CLK_TCK);
+    return (ULONGLONG)unix_time * 10000000 / clocksPerSec;
+}
+
+#endif
+
+/* fetch CPU information about a process */
+DECL_HANDLER(get_process_cpu_info)
+{
+    struct process *process;
+
+    if ((process = get_process_from_handle( req->handle, PROCESS_QUERY_INFORMATION )))
+    {
+#ifdef linux
+        FILE *f;
+
+	f = open_proc_file(process, "stat");
+        if (f)
+        {
+            unsigned long user, kernel;
+            if (fscanf(f, "%*d %*s %*c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %lu %lu",
+                    &user, &kernel)) {
+                reply->user_time = clock_to_timeout(user);
+                reply->kernel_time = clock_to_timeout(kernel);
+            }
+            fclose(f);
+        }
+#else
+        /* TODO */
+#endif
+
+        reply->pid              = get_process_id( process );
+        reply->start_time       = process->start_time;
+        reply->end_time         = process->end_time;
+
+        release_object( process );
+    }
+}
+
+/* fetch VM information about a process */
+DECL_HANDLER(get_process_vm_info)
+{
+    struct process *process;
+
+    if ((process = get_process_from_handle( req->handle, PROCESS_QUERY_INFORMATION )))
+    {
+#ifdef linux
+        FILE *f;
+        char buffer[256];
+
+	f = open_proc_file(process, "stat");
+        if (f)
+        {
+            unsigned long majflt;
+            if (fscanf(f, "%*d %*s %*c %*d %*d %*d %*d %*d %*u %*u %*u %lu",
+                    &majflt))
+                reply->faults = majflt;
+            fclose(f);
+        }
+        f = open_proc_file(process, "status");
+        if (f)
+        {
+            unsigned long total;
+
+            while (fgets( buffer, sizeof(buffer), f ))
+            {
+                if (sscanf(buffer, "VmSize: %lu", &total))
+                    reply->virt = (mem_size_t)total * 1024;
+                if (sscanf(buffer, "VmPeak: %lu", &total))
+                    reply->virt_peak = (mem_size_t)total * 1024;
+                if (sscanf(buffer, "VmRSS: %lu", &total))
+                    reply->resident = (mem_size_t)total * 1024;
+                if (sscanf(buffer, "VmHWM: %lu", &total))
+                    reply->resident_peak = (mem_size_t)total * 1024;
+
+            }
+            fclose(f);
+        }
+        f = open_proc_file(process, "maps");
+        if (f)
+        {
+            unsigned long long startaddr, endaddr;
+            char perm[5];
+
+            while (fgets( buffer, sizeof(buffer), f ))
+            {
+                if (sscanf(buffer, "%llx-%llx %04s ", &startaddr, &endaddr, perm))
+                {
+                    /* only private pages, but exclude no-access reservations */
+                    if (perm[3] == 'p' && strcmp(perm, "---p"))
+                        reply->commit += (mem_size_t)(endaddr - startaddr);
+                }
+            }
+            fclose(f);
+        }
+
+#else
+        /* TODO */
+#endif
+
+        process->commit_peak = max(process->commit_peak, reply->commit);
+        reply->commit_peak = process->commit_peak;
+        reply->pid = get_process_id( process );
+
+        release_object( process );
     }
 }
